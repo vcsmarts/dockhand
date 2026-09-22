@@ -36,7 +36,7 @@ const DefaultArgsSeparator = "--"
 
 // Reserved lists names that cannot be used as aliases because `dockhand <name>`
 // would be interpreted as a subcommand, or because it is the binary itself.
-var Reserved = []string{"dockhand", "install", "list", "init-config", "help"}
+var Reserved = []string{"dockhand", "setup", "list", "init-config", "help"}
 
 // Alias is one entry from aliases.conf.
 type Alias struct {

@@ -1,9 +1,8 @@
 // dockhand is a single binary providing short docker/compose commands with
 // built-in fuzzy container/service selection.
 //
-// It dispatches on the name it was invoked as: `dockhand install` creates one
-// symlink per alias (dl, dcl, dexec, ...) pointing at the dockhand binary, so
-// typing `dl -f` runs `docker logs -f <fuzzy-picked container>`.
+// Every alias from aliases.conf is a subcommand: `dockhand dl -f` runs
+// `docker logs -f <fuzzy-picked container>`. `dockhand list` shows them all.
 package main
 
 import (
@@ -36,20 +35,14 @@ func run() error {
 		return err
 	}
 
-	// Invoked via an alias symlink (dl, dexec, ...)? Run that alias. Any
-	// other name (dockhand, dockhand-linux-amd64, ...) is the main binary.
-	if alias, ok := config.Find(aliases, filepath.Base(os.Args[0])); ok {
-		return runner.Run(alias, os.Args[1:])
-	}
-
 	if len(os.Args) < 2 {
 		usage(aliases, source)
 		return nil
 	}
 
 	switch cmd := os.Args[1]; cmd {
-	case "install":
-		return install(aliases, os.Args[2:])
+	case "setup":
+		return setup(os.Args[2:])
 	case "list":
 		list(aliases, source)
 		return nil
@@ -59,7 +52,6 @@ func run() error {
 		usage(aliases, source)
 		return nil
 	default:
-		// `dockhand <alias> [args...]` also works without symlinks.
 		alias, ok := config.Find(aliases, cmd)
 		if !ok {
 			return fmt.Errorf("unknown command or alias %q (see 'dockhand list')", cmd)
@@ -72,10 +64,11 @@ func usage(aliases []config.Alias, source string) {
 	fmt.Printf(`dockhand — short docker/compose commands with fuzzy target selection
 
 Usage:
-  dockhand install [--bin DIR]   create one symlink per alias (default: ~/.local/bin)
+  dockhand <alias> [args...]     run an alias (see below)
   dockhand list                  show configured aliases
   dockhand init-config           write the default config to your user config dir
-  dockhand <alias> [args...]     run an alias without its symlink
+  dockhand setup [--bin DIR]     copy this binary to DIR (default: ~/.local/bin)
+                                 and add DIR to PATH in your shell rc if needed
 
 Aliases (from %s):
 `, source)
@@ -100,166 +93,169 @@ func describe(a config.Alias) string {
 	return cmd
 }
 
-func install(aliases []config.Alias, args []string) error {
-	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	binDir := fs.String("bin", "", "directory for alias symlinks (default: ~/.local/bin)")
+// setup installs the running binary as DIR/dockhand and makes sure DIR is on
+// PATH, appending an export line to the shell rc file when it is not.
+func setup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	binDir := fs.String("bin", "", "directory to install dockhand into (default: ~/.local/bin)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
 	dir := *binDir
 	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
 		dir = filepath.Join(home, ".local", "bin")
+	}
+	if dir, err = filepath.Abs(dir); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 
-	self, err := os.Executable()
+	dest := filepath.Join(dir, "dockhand")
+	copied, err := installBinary(dest)
 	if err != nil {
 		return err
 	}
-	if self, err = filepath.EvalSymlinks(self); err != nil {
-		return err
+	if copied {
+		fmt.Printf("Installed %s\n", dest)
+	} else {
+		fmt.Printf("%s is already this binary\n", dest)
 	}
 
-	installed := 0
-	for _, a := range aliases {
-		link := filepath.Join(dir, a.Name)
-		// Only replace symlinks we own — never clobber a real file or
-		// someone else's symlink that happens to share an alias name.
-		if info, statErr := os.Lstat(link); statErr == nil {
-			if info.Mode()&os.ModeSymlink == 0 {
-				fmt.Printf("  %-12s SKIPPED: %s exists and is not a symlink\n", a.Name, link)
-				continue
-			}
-			if !ownsLink(link, self) {
-				target, _ := os.Readlink(link)
-				fmt.Printf("  %-12s SKIPPED: %s is a symlink to %s, not to dockhand\n", a.Name, link, target)
-				continue
-			}
-			if err := os.Remove(link); err != nil {
-				return err
-			}
-		}
-		if err := os.Symlink(self, link); err != nil {
-			return err
-		}
-		installed++
-		fmt.Printf("  %-12s -> %s\n", a.Name, describe(a))
-	}
-
-	removed, err := removeStaleLinks(dir, self, aliases)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("\nInstalled %d of %d aliases in %s", installed, len(aliases), dir)
-	if removed > 0 {
-		fmt.Printf(", removed %d stale symlink(s)", removed)
-	}
-	fmt.Println()
-	if !onPath(dir) {
-		fmt.Printf("\nNOTE: %s is not on your PATH. Add to ~/.bashrc:\n  export PATH=\"%s:$PATH\"\n", dir, dir)
+	if onPath(dir) {
+		fmt.Printf("%s is on your PATH.\n", dir)
 		return nil
 	}
-	// Group shadowed aliases by the directory that wins, so ten aliases
-	// shadowed by one stale bin dir produce one warning, not ten.
-	shadowed := map[string][]string{}
-	var order []string
-	for _, a := range aliases {
-		if other := shadowedBy(a.Name, filepath.Join(dir, a.Name)); other != "" {
-			d := filepath.Dir(other)
-			if _, seen := shadowed[d]; !seen {
-				order = append(order, d)
-			}
-			shadowed[d] = append(shadowed[d], a.Name)
-		}
+	rc := shellRC(home)
+	if rc == "" {
+		fmt.Printf("\nNOTE: %s is not on your PATH and your shell (%s) is not recognised.\n"+
+			"Add this to your shell startup file:\n  export PATH=\"%s:$PATH\"\n", dir, os.Getenv("SHELL"), dir)
+		return nil
 	}
-	for _, d := range order {
-		fmt.Printf("\nWARNING: %s comes before %s on your PATH and shadows: %s\n"+
-			"  Remove it from PATH (or delete those files) so the dockhand aliases run.\n",
-			d, dir, strings.Join(shadowed[d], ", "))
+	added, err := ensurePathLine(rc, dir)
+	if err != nil {
+		return err
+	}
+	if added {
+		fmt.Printf("Added %s to PATH in %s. Restart your shell or run:\n  source %s\n", dir, rc, rc)
+	} else {
+		fmt.Printf("%s already adds %s to PATH; restart your shell to pick it up.\n", rc, dir)
 	}
 	return nil
 }
 
-// shadowedBy returns the path of the first executable named name on PATH if
-// it is not link itself, i.e. something earlier on PATH wins over our alias.
-// It returns "" when link is found first or name is not on PATH at all.
-func shadowedBy(name, link string) string {
-	want, err := filepath.Abs(link)
+// installBinary copies the running executable to dest atomically. It returns
+// false when dest already is the running executable.
+func installBinary(dest string) (bool, error) {
+	self, err := os.Executable()
 	if err != nil {
+		return false, err
+	}
+	if self, err = filepath.EvalSymlinks(self); err != nil {
+		return false, err
+	}
+	if resolved, err := filepath.EvalSymlinks(dest); err == nil && resolved == self {
+		return false, nil
+	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".dockhand-*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return false, err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return false, err
+	}
+	// Rename replaces the directory entry; an already-running old binary at
+	// dest keeps its inode and is unaffected.
+	if err := os.Rename(tmpName, dest); err != nil {
+		os.Remove(tmpName)
+		return false, err
+	}
+	return true, nil
+}
+
+// shellRC returns the startup file for the user's login shell, or "" if the
+// shell is not one we know how to edit.
+func shellRC(home string) string {
+	switch filepath.Base(os.Getenv("SHELL")) {
+	case "bash":
+		return filepath.Join(home, ".bashrc")
+	case "zsh":
+		return filepath.Join(home, ".zshrc")
+	default:
 		return ""
 	}
-	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
-		if p == "" {
-			continue
-		}
-		candidate := filepath.Join(p, name)
-		info, err := os.Stat(candidate)
-		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-			continue
-		}
-		if abs, err := filepath.Abs(candidate); err == nil && abs == want {
-			return ""
-		}
-		return candidate
-	}
-	return ""
 }
 
-// ownsLink reports whether the symlink at link belongs to dockhand: it
-// resolves to self, points at a binary named dockhand (e.g. a previous
-// location), or is dangling.
-func ownsLink(link, self string) bool {
-	target, err := os.Readlink(link)
+// ensurePathLine appends `export PATH="<dir>:$PATH"` to rc unless a line
+// already adds dir to PATH. It returns whether a line was added.
+func ensurePathLine(rc, dir string) (bool, error) {
+	existing, err := os.ReadFile(rc)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if pathLineMentions(string(existing), dir) {
+		return false, nil
+	}
+	f, err := os.OpenFile(rc, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return false
+		return false, err
 	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(link), target)
+	defer f.Close()
+	prefix := "\n"
+	if len(existing) == 0 || existing[len(existing)-1] == '\n' {
+		prefix = ""
 	}
-	resolved, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return true // dangling
+	line := fmt.Sprintf("%s\n# added by dockhand setup\nexport PATH=\"%s:$PATH\"\n", prefix, dir)
+	if _, err := f.WriteString(line); err != nil {
+		return false, err
 	}
-	return resolved == self || filepath.Base(target) == "dockhand"
+	return true, nil
 }
 
-// removeStaleLinks deletes symlinks in dir that point at dockhand but whose
-// name is no longer a configured alias (e.g. after editing aliases.conf).
-func removeStaleLinks(dir, self string, aliases []config.Alias) (int, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, err
+// pathLineMentions reports whether content has an uncommented line that sets
+// PATH and mentions dir, either literally or via $HOME/~ for the home part.
+func pathLineMentions(content, dir string) bool {
+	variants := []string{dir}
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(dir, home+string(filepath.Separator)) {
+		rest := dir[len(home):]
+		variants = append(variants, "$HOME"+rest, "${HOME}"+rest, "~"+rest)
 	}
-	removed := 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.Type()&os.ModeSymlink == 0 || name == "dockhand" {
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "PATH") {
 			continue
 		}
-		if _, isAlias := config.Find(aliases, name); isAlias {
-			continue
+		for _, v := range variants {
+			if strings.Contains(line, v) {
+				return true
+			}
 		}
-		link := filepath.Join(dir, name)
-		if !ownsLink(link, self) {
-			continue
-		}
-		if err := os.Remove(link); err != nil {
-			return removed, err
-		}
-		removed++
-		fmt.Printf("  %-12s removed (no longer configured)\n", name)
 	}
-	return removed, nil
+	return false
 }
 
 func initConfig() error {
@@ -276,13 +272,13 @@ func initConfig() error {
 	if err := os.WriteFile(path, []byte(config.Defaults()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("Wrote default config to %s\nEdit it, then re-run 'dockhand install'.\n", path)
+	fmt.Printf("Wrote default config to %s\nEdit it and the new aliases are available immediately.\n", path)
 	return nil
 }
 
 func onPath(dir string) bool {
 	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
-		if p == dir {
+		if abs, err := filepath.Abs(p); err == nil && abs == dir {
 			return true
 		}
 	}

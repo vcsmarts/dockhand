@@ -10,9 +10,8 @@ test:
 	$(GO) vet ./...
 	$(GO) test ./...
 
-install:
-	$(GO) build -o $(BINDIR)/dockhand .
-	$(BINDIR)/dockhand install --bin $(BINDIR)
+install: build
+	./dockhand setup --bin $(BINDIR)
 
 clean:
 	rm -f dockhand

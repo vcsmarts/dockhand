@@ -61,7 +61,7 @@ func TestParseErrors(t *testing.T) {
 		{"too few fields", "dl docker", "want '<name> <picker> <command...>'"},
 		{"bad picker", "dl magic docker logs", "unknown picker"},
 		{"duplicate", "dl docker docker logs\ndl none docker ps", "duplicate alias"},
-		{"reserved name", "list none docker ps", "reserved"},
+		{"reserved name", "setup none docker ps", "reserved"},
 		{"path separator", "../evil none docker ps", "invalid alias name"},
 		{"dash prefix", "-x none docker ps", "invalid alias name"},
 		{"dotdot", ".. none docker ps", "invalid alias name"},
