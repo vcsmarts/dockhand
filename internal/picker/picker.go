@@ -1,6 +1,6 @@
-// Package picker provides interactive fuzzy selection of docker containers
-// and compose services, replacing the fzf dependency of the original bash
-// implementation.
+// Package picker provides interactive fuzzy selection of docker containers,
+// compose services and kubernetes contexts/namespaces/pods, replacing the fzf
+// dependency of the original bash implementation.
 package picker
 
 import (
@@ -121,13 +121,19 @@ func requireTerminal() error {
 }
 
 func dockerOutput(args ...string) (string, error) {
-	out, err := exec.Command("docker", args...).Output()
+	return commandOutput("docker", args...)
+}
+
+// commandOutput runs bin with args and returns stdout, surfacing the tool's
+// own stderr message on failure.
+func commandOutput(bin string, args ...string) (string, error) {
+	out, err := exec.Command(bin, args...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return "", fmt.Errorf("docker %s: %s", strings.Join(args, " "), strings.TrimSpace(string(exitErr.Stderr)))
+			return "", fmt.Errorf("%s %s: %s", bin, strings.Join(args, " "), strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return "", fmt.Errorf("docker %s: %w", strings.Join(args, " "), err)
+		return "", fmt.Errorf("%s %s: %w", bin, strings.Join(args, " "), err)
 	}
 	return string(out), nil
 }

@@ -20,19 +20,32 @@ var defaultsConf string
 type Picker string
 
 const (
-	PickerNone      Picker = "none"       // run the command as-is
-	PickerDocker    Picker = "docker"     // fuzzy-pick one running container
-	PickerDockerAll Picker = "docker-all" // fuzzy-pick one container, running or not
-	PickerCompose   Picker = "compose"    // fuzzy-pick one or more compose services
+	PickerNone          Picker = "none"           // run the command as-is
+	PickerDocker        Picker = "docker"         // fuzzy-pick one running container
+	PickerDockerAll     Picker = "docker-all"     // fuzzy-pick one container, running or not
+	PickerCompose       Picker = "compose"        // fuzzy-pick one or more compose services
+	PickerKubeContext   Picker = "kube-context"   // fuzzy-pick one kubectl context
+	PickerKubeNamespace Picker = "kube-namespace" // fuzzy-pick one namespace
+	PickerKubePod       Picker = "kube-pod"       // fuzzy-pick one pod (honours -n/--context in your args)
 )
+
+// Pickers lists every valid picker, in the order shown in error messages.
+var Pickers = []Picker{
+	PickerNone, PickerDocker, PickerDockerAll, PickerCompose,
+	PickerKubeContext, PickerKubeNamespace, PickerKubePod,
+}
 
 // TargetPlaceholder marks where the picked target(s) go in an alias command.
 // Without it, targets are appended after the user's extra args.
 const TargetPlaceholder = "{}"
 
-// DefaultArgsSeparator separates the command from arguments that are used
-// only when the user passes none: "docker exec -it {} -- sh".
-const DefaultArgsSeparator = "--"
+// Default args are written as a trailing bracket group and are used only
+// when the user passes no args: "kubectl exec -it {} -- [sh]". Brackets are
+// used because "--" is itself a meaningful argument to kubectl and docker.
+const (
+	DefaultArgsOpen  = "["
+	DefaultArgsClose = "]"
+)
 
 // Reserved lists names that cannot be used as aliases because `dockhand <name>`
 // would be interpreted as a subcommand, or because it is the binary itself.
@@ -111,12 +124,10 @@ func Parse(content string) ([]Alias, error) {
 		if len(fields) < 3 {
 			return nil, fmt.Errorf("line %d: want '<name> <picker> <command...>', got %q", lineNo, line)
 		}
-		a := Alias{Name: fields[0], Picker: Picker(fields[1]), Command: fields[2:]}
-		for i, f := range a.Command {
-			if f == DefaultArgsSeparator {
-				a.Command, a.DefaultArgs = a.Command[:i], a.Command[i+1:]
-				break
-			}
+		a := Alias{Name: fields[0], Picker: Picker(fields[1])}
+		var err error
+		if a.Command, a.DefaultArgs, err = splitDefaultArgs(fields[2:]); err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		if err := a.validate(); err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNo, err)
@@ -128,6 +139,40 @@ func Parse(content string) ([]Alias, error) {
 		aliases = append(aliases, a)
 	}
 	return aliases, scanner.Err()
+}
+
+// splitDefaultArgs separates a trailing "[a b c]" group from the command.
+// defaults is nil when there is no group.
+func splitDefaultArgs(tokens []string) (command, defaults []string, err error) {
+	open := -1
+	for i, t := range tokens {
+		if strings.HasPrefix(t, DefaultArgsOpen) {
+			if open >= 0 {
+				return nil, nil, fmt.Errorf("only one %s...%s default-args group is allowed", DefaultArgsOpen, DefaultArgsClose)
+			}
+			open = i
+		}
+	}
+	if open < 0 {
+		return tokens, nil, nil
+	}
+	last := tokens[len(tokens)-1]
+	if !strings.HasSuffix(last, DefaultArgsClose) {
+		return nil, nil, fmt.Errorf("%s default-args group must close with %s at the end of the line", DefaultArgsOpen, DefaultArgsClose)
+	}
+	group := append([]string{}, tokens[open:]...)
+	group[0] = strings.TrimPrefix(group[0], DefaultArgsOpen)
+	group[len(group)-1] = strings.TrimSuffix(group[len(group)-1], DefaultArgsClose)
+	defaults = make([]string, 0, len(group))
+	for _, g := range group {
+		if g != "" {
+			defaults = append(defaults, g)
+		}
+	}
+	if len(defaults) == 0 {
+		return nil, nil, fmt.Errorf("empty %s%s default-args group", DefaultArgsOpen, DefaultArgsClose)
+	}
+	return tokens[:open], defaults, nil
 }
 
 func (a Alias) validate() error {
@@ -142,10 +187,19 @@ func (a Alias) validate() error {
 			return fmt.Errorf("alias name %q is reserved (dockhand subcommand)", a.Name)
 		}
 	}
-	switch a.Picker {
-	case PickerNone, PickerDocker, PickerDockerAll, PickerCompose:
-	default:
-		return fmt.Errorf("unknown picker %q (want none, docker, docker-all, or compose)", a.Picker)
+	valid := false
+	for _, p := range Pickers {
+		if a.Picker == p {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		names := make([]string, len(Pickers))
+		for i, p := range Pickers {
+			names[i] = string(p)
+		}
+		return fmt.Errorf("unknown picker %q (want one of %s)", a.Picker, strings.Join(names, ", "))
 	}
 	placeholders := 0
 	for _, c := range a.Command {
@@ -160,13 +214,10 @@ func (a Alias) validate() error {
 		return fmt.Errorf("%s placeholder needs a picker other than none", TargetPlaceholder)
 	}
 	if len(a.Command) == 0 {
-		return fmt.Errorf("command is empty (nothing before %s)", DefaultArgsSeparator)
+		return fmt.Errorf("command is empty (nothing before the %s...%s group)", DefaultArgsOpen, DefaultArgsClose)
 	}
 	if a.Command[0] == TargetPlaceholder {
 		return fmt.Errorf("command cannot start with %s", TargetPlaceholder)
-	}
-	if a.DefaultArgs != nil && len(a.DefaultArgs) == 0 {
-		return fmt.Errorf("nothing after %s (default args)", DefaultArgsSeparator)
 	}
 	return nil
 }

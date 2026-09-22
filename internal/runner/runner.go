@@ -16,11 +16,12 @@ import (
 // and replaces the current process with it via execve. On success it does
 // not return.
 func Run(alias config.Alias, userArgs []string) error {
-	targets, err := pick(alias.Picker)
+	userArgs = effectiveArgs(alias, userArgs)
+	targets, err := pick(alias.Picker, userArgs)
 	if err != nil {
 		return err
 	}
-	argv := BuildArgv(alias.Command, effectiveArgs(alias, userArgs), targets)
+	argv := BuildArgv(alias.Command, userArgs, targets)
 
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
@@ -68,16 +69,26 @@ func effectiveArgs(alias config.Alias, userArgs []string) []string {
 	return userArgs
 }
 
-func pick(p config.Picker) ([]string, error) {
-	switch p {
-	case config.PickerDocker, config.PickerDockerAll:
-		name, err := picker.Container(p == config.PickerDockerAll)
+// pick resolves the alias's target(s). userArgs is inspected by the kube
+// pickers so that -n/--context in the user's args scope what is listed.
+func pick(p config.Picker, userArgs []string) ([]string, error) {
+	one := func(name string, err error) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
 		return []string{name}, nil
+	}
+	switch p {
+	case config.PickerDocker, config.PickerDockerAll:
+		return one(picker.Container(p == config.PickerDockerAll))
 	case config.PickerCompose:
 		return picker.ComposeServices()
+	case config.PickerKubeContext:
+		return one(picker.KubeContext())
+	case config.PickerKubeNamespace:
+		return one(picker.KubeNamespace(picker.KubeScope(userArgs)))
+	case config.PickerKubePod:
+		return one(picker.KubePod(picker.KubeScope(userArgs)))
 	default:
 		return nil, nil
 	}

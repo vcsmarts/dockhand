@@ -23,6 +23,9 @@ func TestParseDefaults(t *testing.T) {
 		"dexec": {PickerDocker, "docker exec -it {}"},
 		"dcl":   {PickerCompose, "docker compose logs"},
 		"dps":   {PickerNone, "docker ps"},
+		"kctx":  {PickerKubeContext, "kubectl config use-context {}"},
+		"kl":    {PickerKubePod, "kubectl logs"},
+		"kexec": {PickerKubePod, "kubectl exec -it {} --"},
 	}
 	for name, w := range want {
 		a, ok := Find(aliases, name)
@@ -40,8 +43,21 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+func TestParseDefaultArgsKeepsLiteralDashDash(t *testing.T) {
+	aliases, err := Parse("kexec kube-pod kubectl exec -it {} -- [sh]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(aliases[0].Command, " "); got != "kubectl exec -it {} --" {
+		t.Errorf("command = %q, literal -- must survive", got)
+	}
+	if got := strings.Join(aliases[0].DefaultArgs, " "); got != "sh" {
+		t.Errorf("default args = %q", got)
+	}
+}
+
 func TestParseDefaultArgs(t *testing.T) {
-	aliases, err := Parse("dexec docker docker exec -it {} -- sh -l\ndps none docker ps\n")
+	aliases, err := Parse("dexec docker docker exec -it {} [sh -l]\ndps none docker ps\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +84,11 @@ func TestParseErrors(t *testing.T) {
 		{"placeholder without picker", "dps none docker ps {}", "needs a picker"},
 		{"two placeholders", "dx docker docker exec {} {}", "at most once"},
 		{"placeholder first", "dx docker {} exec", "cannot start with"},
-		{"empty default args", "dx docker docker exec -it {} --", "nothing after --"},
-		{"empty command before --", "dx docker -- sh", "command is empty"},
+		{"empty default args", "dx docker docker exec -it {} []", "empty [] default-args group"},
+		{"empty command before group", "dx docker [sh]", "command is empty"},
+		{"unclosed group", "dx docker docker exec -it {} [sh -l", "must close with ]"},
+		{"group not at end", "dx docker docker exec [sh] -it {}", "must close with ]"},
+		{"two groups", "dx docker docker exec {} [a] [b]", "only one"},
 	} {
 		_, err := Parse(tc.content)
 		if err == nil {

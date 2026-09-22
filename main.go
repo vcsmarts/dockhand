@@ -80,7 +80,7 @@ func list(aliases []config.Alias, source string) {
 		fmt.Printf("# from %s\n", source)
 	}
 	for _, a := range aliases {
-		fmt.Printf("  %-12s %-10s %s\n", a.Name, a.Picker, describe(a))
+		fmt.Printf("  %-12s %-15s %s\n", a.Name, a.Picker, describe(a))
 	}
 }
 
@@ -88,7 +88,7 @@ func list(aliases []config.Alias, source string) {
 func describe(a config.Alias) string {
 	cmd := strings.Join(a.Command, " ")
 	if len(a.DefaultArgs) > 0 {
-		cmd += " " + config.DefaultArgsSeparator + " " + strings.Join(a.DefaultArgs, " ")
+		cmd += " " + config.DefaultArgsOpen + strings.Join(a.DefaultArgs, " ") + config.DefaultArgsClose
 	}
 	return cmd
 }
