@@ -87,12 +87,17 @@ func list(aliases []config.Alias, source string) {
 		fmt.Printf("# from %s\n", source)
 	}
 	for _, a := range aliases {
-		cmd := strings.Join(a.Command, " ")
-		if len(a.DefaultArgs) > 0 {
-			cmd += " " + config.DefaultArgsSeparator + " " + strings.Join(a.DefaultArgs, " ")
-		}
-		fmt.Printf("  %-12s %-10s %s\n", a.Name, a.Picker, cmd)
+		fmt.Printf("  %-12s %-10s %s\n", a.Name, a.Picker, describe(a))
 	}
+}
+
+// describe renders an alias command the way it is written in aliases.conf.
+func describe(a config.Alias) string {
+	cmd := strings.Join(a.Command, " ")
+	if len(a.DefaultArgs) > 0 {
+		cmd += " " + config.DefaultArgsSeparator + " " + strings.Join(a.DefaultArgs, " ")
+	}
+	return cmd
 }
 
 func install(aliases []config.Alias, args []string) error {
@@ -147,7 +152,7 @@ func install(aliases []config.Alias, args []string) error {
 			return err
 		}
 		installed++
-		fmt.Printf("  %-12s -> %s\n", a.Name, strings.Join(a.Command, " "))
+		fmt.Printf("  %-12s -> %s\n", a.Name, describe(a))
 	}
 
 	removed, err := removeStaleLinks(dir, self, aliases)
@@ -164,10 +169,23 @@ func install(aliases []config.Alias, args []string) error {
 		fmt.Printf("\nNOTE: %s is not on your PATH. Add to ~/.bashrc:\n  export PATH=\"%s:$PATH\"\n", dir, dir)
 		return nil
 	}
+	// Group shadowed aliases by the directory that wins, so ten aliases
+	// shadowed by one stale bin dir produce one warning, not ten.
+	shadowed := map[string][]string{}
+	var order []string
 	for _, a := range aliases {
 		if other := shadowedBy(a.Name, filepath.Join(dir, a.Name)); other != "" {
-			fmt.Printf("\nWARNING: %q resolves to %s, which comes before %s on your PATH.\n", a.Name, other, dir)
+			d := filepath.Dir(other)
+			if _, seen := shadowed[d]; !seen {
+				order = append(order, d)
+			}
+			shadowed[d] = append(shadowed[d], a.Name)
 		}
+	}
+	for _, d := range order {
+		fmt.Printf("\nWARNING: %s comes before %s on your PATH and shadows: %s\n"+
+			"  Remove it from PATH (or delete those files) so the dockhand aliases run.\n",
+			d, dir, strings.Join(shadowed[d], ", "))
 	}
 	return nil
 }
