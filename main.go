@@ -162,8 +162,39 @@ func install(aliases []config.Alias, args []string) error {
 	fmt.Println()
 	if !onPath(dir) {
 		fmt.Printf("\nNOTE: %s is not on your PATH. Add to ~/.bashrc:\n  export PATH=\"%s:$PATH\"\n", dir, dir)
+		return nil
+	}
+	for _, a := range aliases {
+		if other := shadowedBy(a.Name, filepath.Join(dir, a.Name)); other != "" {
+			fmt.Printf("\nWARNING: %q resolves to %s, which comes before %s on your PATH.\n", a.Name, other, dir)
+		}
 	}
 	return nil
+}
+
+// shadowedBy returns the path of the first executable named name on PATH if
+// it is not link itself, i.e. something earlier on PATH wins over our alias.
+// It returns "" when link is found first or name is not on PATH at all.
+func shadowedBy(name, link string) string {
+	want, err := filepath.Abs(link)
+	if err != nil {
+		return ""
+	}
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p == "" {
+			continue
+		}
+		candidate := filepath.Join(p, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		if abs, err := filepath.Abs(candidate); err == nil && abs == want {
+			return ""
+		}
+		return candidate
+	}
+	return ""
 }
 
 // ownsLink reports whether the symlink at link belongs to dockhand: it
