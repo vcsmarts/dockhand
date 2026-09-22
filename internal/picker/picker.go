@@ -6,36 +6,47 @@ package picker
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/ktr0731/go-fuzzyfinder"
+	"golang.org/x/term"
 )
 
 // ErrAborted is returned when the user cancels the picker (ESC / ctrl-c).
 var ErrAborted = errors.New("no selection")
 
-type container struct {
+// ErrNoTerminal is returned when the picker cannot run because stdin or
+// stdout is not an interactive terminal.
+var ErrNoTerminal = errors.New("the fuzzy picker needs an interactive terminal (stdin and stdout must be a TTY)")
+
+// ContainerInfo holds the columns of one `docker ps` row.
+type ContainerInfo struct {
 	Name   string
 	Image  string
 	Status string
 }
 
-// Container fuzzy-picks exactly one running container and returns its name.
-func Container() (string, error) {
-	out, err := dockerOutput("ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}")
+// Container fuzzy-picks exactly one container and returns its name. With all
+// set, stopped containers are offered too (docker ps -a).
+func Container(all bool) (string, error) {
+	if err := requireTerminal(); err != nil {
+		return "", err
+	}
+	args := []string{"ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
+	if all {
+		args = append(args, "--all")
+	}
+	out, err := dockerOutput(args...)
 	if err != nil {
 		return "", err
 	}
-	var containers []container
-	for _, line := range splitLines(out) {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		containers = append(containers, container{Name: parts[0], Image: parts[1], Status: parts[2]})
-	}
+	containers := ParseContainers(out)
 	if len(containers) == 0 {
+		if all {
+			return "", errors.New("no containers")
+		}
 		return "", errors.New("no running containers")
 	}
 
@@ -53,9 +64,13 @@ func Container() (string, error) {
 }
 
 // ComposeServices fuzzy-picks one or more compose services (TAB to
-// multi-select) and returns their names.
+// multi-select) and returns their names. All services of the project are
+// offered, including stopped ones, since logs/restart/up apply to those too.
 func ComposeServices() ([]string, error) {
-	out, err := dockerOutput("compose", "ps", "--services")
+	if err := requireTerminal(); err != nil {
+		return nil, err
+	}
+	out, err := dockerOutput("compose", "ps", "--all", "--services")
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +92,32 @@ func ComposeServices() ([]string, error) {
 		picked[i] = services[idx]
 	}
 	return picked, nil
+}
+
+// ParseContainers turns the tab-separated output of
+// `docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'` into ContainerInfos.
+// Malformed lines are skipped.
+func ParseContainers(out string) []ContainerInfo {
+	var containers []ContainerInfo
+	for _, line := range splitLines(out) {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		containers = append(containers, ContainerInfo{
+			Name:   strings.TrimSpace(parts[0]),
+			Image:  strings.TrimSpace(parts[1]),
+			Status: strings.TrimSpace(parts[2]),
+		})
+	}
+	return containers
+}
+
+func requireTerminal() error {
+	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		return ErrNoTerminal
+	}
+	return nil
 }
 
 func dockerOutput(args ...string) (string, error) {

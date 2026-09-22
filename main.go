@@ -36,13 +36,9 @@ func run() error {
 		return err
 	}
 
-	// Invoked via an alias symlink (dl, dexec, ...)? Run that alias.
-	invoked := filepath.Base(os.Args[0])
-	if invoked != "dockhand" {
-		alias, ok := config.Find(aliases, invoked)
-		if !ok {
-			return fmt.Errorf("invoked as %q but no such alias is defined in %s", invoked, source)
-		}
+	// Invoked via an alias symlink (dl, dexec, ...)? Run that alias. Any
+	// other name (dockhand, dockhand-linux-amd64, ...) is the main binary.
+	if alias, ok := config.Find(aliases, filepath.Base(os.Args[0])); ok {
 		return runner.Run(alias, os.Args[1:])
 	}
 
@@ -91,14 +87,21 @@ func list(aliases []config.Alias, source string) {
 		fmt.Printf("# from %s\n", source)
 	}
 	for _, a := range aliases {
-		fmt.Printf("  %-12s %-8s %s\n", a.Name, a.Picker, strings.Join(a.Command, " "))
+		cmd := strings.Join(a.Command, " ")
+		if len(a.DefaultArgs) > 0 {
+			cmd += " " + config.DefaultArgsSeparator + " " + strings.Join(a.DefaultArgs, " ")
+		}
+		fmt.Printf("  %-12s %-10s %s\n", a.Name, a.Picker, cmd)
 	}
 }
 
 func install(aliases []config.Alias, args []string) error {
-	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	binDir := fs.String("bin", "", "directory for alias symlinks (default: ~/.local/bin)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	dir := *binDir
@@ -121,13 +124,19 @@ func install(aliases []config.Alias, args []string) error {
 		return err
 	}
 
+	installed := 0
 	for _, a := range aliases {
 		link := filepath.Join(dir, a.Name)
-		// Only replace things that are already symlinks — never clobber a
-		// real file that happens to share an alias name.
+		// Only replace symlinks we own — never clobber a real file or
+		// someone else's symlink that happens to share an alias name.
 		if info, statErr := os.Lstat(link); statErr == nil {
 			if info.Mode()&os.ModeSymlink == 0 {
 				fmt.Printf("  %-12s SKIPPED: %s exists and is not a symlink\n", a.Name, link)
+				continue
+			}
+			if !ownsLink(link, self) {
+				target, _ := os.Readlink(link)
+				fmt.Printf("  %-12s SKIPPED: %s is a symlink to %s, not to dockhand\n", a.Name, link, target)
 				continue
 			}
 			if err := os.Remove(link); err != nil {
@@ -137,14 +146,71 @@ func install(aliases []config.Alias, args []string) error {
 		if err := os.Symlink(self, link); err != nil {
 			return err
 		}
+		installed++
 		fmt.Printf("  %-12s -> %s\n", a.Name, strings.Join(a.Command, " "))
 	}
 
-	fmt.Printf("\nInstalled %d aliases in %s\n", len(aliases), dir)
+	removed, err := removeStaleLinks(dir, self, aliases)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\nInstalled %d of %d aliases in %s", installed, len(aliases), dir)
+	if removed > 0 {
+		fmt.Printf(", removed %d stale symlink(s)", removed)
+	}
+	fmt.Println()
 	if !onPath(dir) {
 		fmt.Printf("\nNOTE: %s is not on your PATH. Add to ~/.bashrc:\n  export PATH=\"%s:$PATH\"\n", dir, dir)
 	}
 	return nil
+}
+
+// ownsLink reports whether the symlink at link belongs to dockhand: it
+// resolves to self, points at a binary named dockhand (e.g. a previous
+// location), or is dangling.
+func ownsLink(link, self string) bool {
+	target, err := os.Readlink(link)
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(link), target)
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return true // dangling
+	}
+	return resolved == self || filepath.Base(target) == "dockhand"
+}
+
+// removeStaleLinks deletes symlinks in dir that point at dockhand but whose
+// name is no longer a configured alias (e.g. after editing aliases.conf).
+func removeStaleLinks(dir, self string, aliases []config.Alias) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.Type()&os.ModeSymlink == 0 || name == "dockhand" {
+			continue
+		}
+		if _, isAlias := config.Find(aliases, name); isAlias {
+			continue
+		}
+		link := filepath.Join(dir, name)
+		if !ownsLink(link, self) {
+			continue
+		}
+		if err := os.Remove(link); err != nil {
+			return removed, err
+		}
+		removed++
+		fmt.Printf("  %-12s removed (no longer configured)\n", name)
+	}
+	return removed, nil
 }
 
 func initConfig() error {

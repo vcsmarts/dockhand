@@ -2,7 +2,10 @@ module github.com/Innovative-Digitale-Medizin-IDM/dockhand
 
 go 1.26
 
-require github.com/ktr0731/go-fuzzyfinder v0.9.0
+require (
+	github.com/ktr0731/go-fuzzyfinder v0.9.0
+	golang.org/x/term v0.31.0
+)
 
 require (
 	github.com/gdamore/encoding v1.0.1 // indirect
@@ -14,6 +17,5 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/sys v0.32.0 // indirect
-	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 )

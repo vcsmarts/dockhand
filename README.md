@@ -16,30 +16,40 @@ dockhand install            # creates dl, dcl, dexec, ... symlinks in ~/.local/b
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. The only runtime dependency is the
-`docker` CLI itself.
+`docker` CLI itself. dockhand runs on Linux and macOS (it replaces itself with
+the docker command via `execve`).
 
 ## Usage
 
 ```bash
 dl -f --tail 0      # fuzzy-pick a container, then: docker logs -f --tail 0 <picked>
 dcl -f              # fuzzy-pick service(s),   then: docker compose logs -f <picked>
-dexec               # fuzzy-pick a container,  then: docker exec -it <picked>
+dexec               # fuzzy-pick a container,  then: docker exec -it <picked> sh
+dexec bash          # fuzzy-pick a container,  then: docker exec -it <picked> bash
 dps                 # docker ps
 dcdown              # docker compose down
 ```
 
-Your extra args are inserted **before** the picked target, so flags work as
-expected. For `compose` pickers, use `TAB` to select multiple services.
+By default your extra args are inserted **before** the picked target, so flags
+work as expected. Commands that need the target *before* your args, like
+`docker exec CONTAINER COMMAND`, put a `{}` placeholder in the alias command;
+the target replaces it and your args go last. Anything after `--` in the alias
+command is used only when you pass no args at all, which is how bare `dexec`
+falls back to `sh`. For `compose` pickers, use `TAB` to select multiple
+services.
+
+The picker needs an interactive terminal; aliases with a picker cannot be used
+in pipes or scripts.
 
 Every alias also works without its symlink: `dockhand dl -f`.
 
 ## Default aliases
 
-| alias       | picker  | command                   |
-|-------------|---------|---------------------------|
-| `dl`        | docker  | `docker logs`             |
+| alias       | picker     | command                |
+|-------------|------------|------------------------|
+| `dl`        | docker-all | `docker logs`          |
 | `dcl`       | compose | `docker compose logs`     |
-| `dexec`     | docker  | `docker exec -it`         |
+| `dexec`     | docker  | `docker exec -it {} -- sh` |
 | `dstop`     | docker  | `docker stop`             |
 | `dps`       | none    | `docker ps`               |
 | `dcps`      | none    | `docker compose ps`       |
@@ -56,6 +66,10 @@ $EDITOR ~/.config/dockhand/aliases.conf
 dockhand install            # re-create symlinks for the new set
 ```
 
+`dockhand install` only touches symlinks that point at dockhand: it never
+replaces a real file or someone else's symlink with an alias name, and it
+removes symlinks to dockhand whose alias you deleted from the config.
+
 One line per alias:
 
 ```
@@ -65,11 +79,15 @@ One line per alias:
 
 `picker` is one of:
 
-| picker    | behaviour                                        |
-|-----------|--------------------------------------------------|
-| `none`    | no target; runs the command as-is                |
-| `docker`  | fuzzy-pick one running container (`docker ps`)   |
-| `compose` | fuzzy-pick one+ compose services (multi-select)  |
+| picker       | behaviour                                              |
+|--------------|--------------------------------------------------------|
+| `none`       | no target; runs the command as-is                      |
+| `docker`     | fuzzy-pick one running container (`docker ps`)         |
+| `docker-all` | fuzzy-pick one container, running or not (`docker ps -a`) |
+| `compose`    | fuzzy-pick one+ services of the project (multi-select) |
+
+Alias names must be plain file names (no `/`) and cannot be one of dockhand's
+own subcommands (`install`, `list`, `init-config`, `help`).
 
 ## How it works
 
