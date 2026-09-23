@@ -50,12 +50,15 @@ func Container(all bool) (string, error) {
 		return "", errors.New("no running containers")
 	}
 
+	rows := make([][]string, len(containers))
+	for i, c := range containers {
+		rows[i] = []string{c.Name, c.Image, c.Status}
+	}
+	tb := newTable([]string{"NAME", "IMAGE", "STATUS"}, rows)
 	idx, err := fuzzyfinder.Find(
 		containers,
-		func(i int) string {
-			return fmt.Sprintf("%s  (%s, %s)", containers[i].Name, containers[i].Image, containers[i].Status)
-		},
-		fuzzyfinder.WithHeader("pick a container"),
+		func(i int) string { return tb.Line(rows[i]) },
+		fuzzyfinder.WithHeader(tb.Header()),
 	)
 	if err != nil {
 		return "", pickErr(err)

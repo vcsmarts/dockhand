@@ -104,13 +104,15 @@ func KubePod(scope []string) (string, error) {
 	if len(pods) == 0 {
 		return "", errors.New("no pods found in this namespace")
 	}
+	rows := make([][]string, len(pods))
+	for i, p := range pods {
+		rows[i] = []string{p.Name, p.Ready, p.Status, p.Restarts, p.Age}
+	}
+	tb := newTable([]string{"NAME", "READY", "STATUS", "RESTARTS", "AGE"}, rows)
 	idx, err := fuzzyfinder.Find(
 		pods,
-		func(i int) string {
-			p := pods[i]
-			return fmt.Sprintf("%s  (%s, %s, %s)", p.Name, p.Status, p.Ready, p.Age)
-		},
-		fuzzyfinder.WithHeader("pick a pod"),
+		func(i int) string { return tb.Line(rows[i]) },
+		fuzzyfinder.WithHeader(tb.Header()),
 	)
 	if err != nil {
 		return "", pickErr(err)
