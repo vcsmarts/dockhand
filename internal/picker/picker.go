@@ -1,6 +1,7 @@
-// Package picker provides interactive fuzzy selection of docker containers,
-// compose services and kubernetes contexts/namespaces/pods, replacing the fzf
-// dependency of the original bash implementation.
+// Package picker offers the rows of a command's tabular output in an
+// interactive fuzzy finder and returns the chosen value(s). It is
+// tool-agnostic: what to run and which column is the target come from the
+// picker definition in the config.
 package picker
 
 import (
@@ -8,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/ktr0731/go-fuzzyfinder"
 	"golang.org/x/term"
+
+	"github.com/Innovative-Digitale-Medizin-IDM/dockhand/internal/config"
 )
 
 // ErrAborted is returned when the user cancels the picker (ESC / ctrl-c).
@@ -21,99 +25,113 @@ var ErrAborted = errors.New("no selection")
 // stdout is not an interactive terminal.
 var ErrNoTerminal = errors.New("the fuzzy picker needs an interactive terminal (stdin and stdout must be a TTY)")
 
-// ContainerInfo holds the columns of one `docker ps` row.
-type ContainerInfo struct {
-	Name   string
-	Image  string
-	Status string
-}
-
-// Container fuzzy-picks exactly one container and returns its name. With all
-// set, stopped containers are offered too (docker ps -a).
-func Container(all bool) (string, error) {
+// Pick runs the picker's list command (plus any forwarded flags from
+// userArgs), shows its rows aligned as a table and returns the target column
+// of the selected row(s).
+func Pick(p config.Picker, userArgs []string) ([]string, error) {
 	if err := requireTerminal(); err != nil {
-		return "", err
+		return nil, err
 	}
-	args := []string{"ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"}
-	if all {
-		args = append(args, "--all")
-	}
-	out, err := dockerOutput(args...)
+	args := append(append([]string{}, p.Command[1:]...), Forward(p.Forward, userArgs)...)
+	out, err := commandOutput(p.Command[0], args...)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	containers := ParseContainers(out)
-	if len(containers) == 0 {
-		if all {
-			return "", errors.New("no containers")
+	titles, rows := ParseTable(out, p.Header)
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("picker %s: '%s' listed nothing", p.Name, strings.Join(append([]string{p.Command[0]}, args...), " "))
+	}
+	col, err := resolveColumn(p.Column, titles)
+	if err != nil {
+		return nil, fmt.Errorf("picker %s: %w", p.Name, err)
+	}
+
+	// The finder shows the header on one line, so with titles the column
+	// header itself is the header line, aligned above the rows.
+	tb := newTable(titles, rows)
+	header := fmt.Sprintf("pick %s", p.Name)
+	if titles != nil {
+		header = tb.Header()
+	}
+	if p.Multi {
+		header += "   (TAB selects several, ENTER confirms)"
+	}
+	render := func(i int) string { return tb.Line(rows[i]) }
+	value := func(i int) (string, error) {
+		if col >= len(rows[i]) || rows[i][col] == "" {
+			return "", fmt.Errorf("picker %s: selected row has no value in column %d: %q", p.Name, col+1, tb.Line(rows[i]))
 		}
-		return "", errors.New("no running containers")
+		return rows[i][col], nil
 	}
 
-	rows := make([][]string, len(containers))
-	for i, c := range containers {
-		rows[i] = []string{c.Name, c.Image, c.Status}
+	if !p.Multi {
+		idx, err := fuzzyfinder.Find(rows, render, fuzzyfinder.WithHeader(header))
+		if err != nil {
+			return nil, pickErr(err)
+		}
+		v, err := value(idx)
+		if err != nil {
+			return nil, err
+		}
+		return []string{v}, nil
 	}
-	tb := newTable([]string{"NAME", "IMAGE", "STATUS"}, rows)
-	idx, err := fuzzyfinder.Find(
-		containers,
-		func(i int) string { return tb.Line(rows[i]) },
-		fuzzyfinder.WithHeader(tb.Header()),
-	)
-	if err != nil {
-		return "", pickErr(err)
-	}
-	return containers[idx].Name, nil
-}
-
-// ComposeServices fuzzy-picks one or more compose services (TAB to
-// multi-select) and returns their names. All services of the project are
-// offered, including stopped ones, since logs/restart/up apply to those too.
-func ComposeServices() ([]string, error) {
-	if err := requireTerminal(); err != nil {
-		return nil, err
-	}
-	out, err := dockerOutput("compose", "ps", "--all", "--services")
-	if err != nil {
-		return nil, err
-	}
-	services := splitLines(out)
-	if len(services) == 0 {
-		return nil, errors.New("no compose services found (are you in a compose project directory?)")
-	}
-
-	idxs, err := fuzzyfinder.FindMulti(
-		services,
-		func(i int) string { return services[i] },
-		fuzzyfinder.WithHeader("TAB to select multiple, ENTER to confirm"),
-	)
+	idxs, err := fuzzyfinder.FindMulti(rows, render, fuzzyfinder.WithHeader(header))
 	if err != nil {
 		return nil, pickErr(err)
 	}
-	picked := make([]string, len(idxs))
-	for i, idx := range idxs {
-		picked[i] = services[idx]
+	picked := make([]string, 0, len(idxs))
+	for _, idx := range idxs {
+		v, err := value(idx)
+		if err != nil {
+			return nil, err
+		}
+		picked = append(picked, v)
 	}
 	return picked, nil
 }
 
-// ParseContainers turns the tab-separated output of
-// `docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}'` into ContainerInfos.
-// Malformed lines are skipped.
-func ParseContainers(out string) []ContainerInfo {
-	var containers []ContainerInfo
-	for _, line := range splitLines(out) {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 {
+// Forward returns the subset of userArgs that the picker wants copied to its
+// list command: each flag in flags, in both "--flag value" and "--flag=value"
+// forms. A flag at the very end with no value is dropped.
+func Forward(flags, userArgs []string) []string {
+	if len(flags) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, f := range flags {
+		want[f] = true
+	}
+	var out []string
+	for i := 0; i < len(userArgs); i++ {
+		arg := userArgs[i]
+		name, _, hasValue := strings.Cut(arg, "=")
+		if !want[name] {
 			continue
 		}
-		containers = append(containers, ContainerInfo{
-			Name:   strings.TrimSpace(parts[0]),
-			Image:  strings.TrimSpace(parts[1]),
-			Status: strings.TrimSpace(parts[2]),
-		})
+		if hasValue {
+			out = append(out, arg)
+		} else if i+1 < len(userArgs) {
+			out = append(out, name, userArgs[i+1])
+			i++
+		}
 	}
-	return containers
+	return out
+}
+
+// resolveColumn turns the picker's col= setting into a 0-based index.
+func resolveColumn(col string, titles []string) (int, error) {
+	if col == "" {
+		return 0, nil
+	}
+	if n, err := strconv.Atoi(col); err == nil {
+		return n - 1, nil
+	}
+	for i, t := range titles {
+		if strings.EqualFold(t, col) {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("no column titled %q (header has: %s)", col, strings.Join(titles, ", "))
 }
 
 func requireTerminal() error {
@@ -121,10 +139,6 @@ func requireTerminal() error {
 		return ErrNoTerminal
 	}
 	return nil
-}
-
-func dockerOutput(args ...string) (string, error) {
-	return commandOutput("docker", args...)
 }
 
 // commandOutput runs bin with args and returns stdout, surfacing the tool's
@@ -139,16 +153,6 @@ func commandOutput(bin string, args ...string) (string, error) {
 		return "", fmt.Errorf("%s %s: %w", bin, strings.Join(args, " "), err)
 	}
 	return string(out), nil
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	for _, line := range strings.Split(s, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }
 
 func pickErr(err error) error {

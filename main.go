@@ -30,13 +30,13 @@ func main() {
 }
 
 func run() error {
-	aliases, source, err := config.Load()
+	cfg, source, err := config.Load()
 	if err != nil {
 		return err
 	}
 
 	if len(os.Args) < 2 {
-		usage(aliases, source)
+		usage(cfg, source)
 		return nil
 	}
 
@@ -44,23 +44,23 @@ func run() error {
 	case "setup":
 		return setup(os.Args[2:])
 	case "list":
-		list(aliases, source)
+		list(cfg, source)
 		return nil
 	case "init-config":
 		return initConfig()
 	case "help", "-h", "--help":
-		usage(aliases, source)
+		usage(cfg, source)
 		return nil
 	default:
-		alias, ok := config.Find(aliases, cmd)
+		alias, ok := cfg.FindAlias(cmd)
 		if !ok {
 			return fmt.Errorf("unknown command or alias %q (see 'dockhand list')", cmd)
 		}
-		return runner.Run(alias, os.Args[2:])
+		return runner.Run(cfg, alias, os.Args[2:])
 	}
 }
 
-func usage(aliases []config.Alias, source string) {
+func usage(cfg *config.Config, source string) {
 	fmt.Printf(`dockhand — short docker/compose commands with fuzzy target selection
 
 Usage:
@@ -70,27 +70,68 @@ Usage:
   dockhand setup [--bin DIR]     copy this binary to DIR (default: ~/.local/bin)
                                  and add DIR to PATH in your shell rc if needed
 
-Aliases (from %s):
+Configuration from %s.
 `, source)
-	list(aliases, "")
+	list(cfg, "")
 }
 
-func list(aliases []config.Alias, source string) {
+func list(cfg *config.Config, source string) {
 	if source != "" && source != "builtin" {
 		fmt.Printf("# from %s\n", source)
 	}
-	for _, a := range aliases {
-		fmt.Printf("  %-12s %-15s %s\n", a.Name, a.Picker, describe(a))
+	fmt.Printf("\nAliases:\n  %-12s %-15s %s\n", "NAME", "PICKER", "COMMAND")
+	for _, a := range cfg.Aliases {
+		fmt.Printf("  %-12s %-15s %s\n", a.Name, a.Picker, describeAlias(a))
+	}
+	if len(cfg.Pickers) == 0 {
+		return
+	}
+	fmt.Printf("\nPickers:\n  %-15s %-45s %s\n", "NAME", "OPTIONS", "LIST COMMAND")
+	for _, p := range cfg.Pickers {
+		fmt.Printf("  %-15s %-45s %s\n", p.Name, describePickerOptions(p), quoteWords(p.Command))
 	}
 }
 
-// describe renders an alias command the way it is written in aliases.conf.
-func describe(a config.Alias) string {
-	cmd := strings.Join(a.Command, " ")
+// describeAlias renders an alias command the way it is written in aliases.conf.
+func describeAlias(a config.Alias) string {
+	cmd := quoteWords(a.Command)
 	if len(a.DefaultArgs) > 0 {
-		cmd += " " + config.DefaultArgsOpen + strings.Join(a.DefaultArgs, " ") + config.DefaultArgsClose
+		cmd += " " + config.DefaultArgsOpen + quoteWords(a.DefaultArgs) + config.DefaultArgsClose
 	}
 	return cmd
+}
+
+func describePickerOptions(p config.Picker) string {
+	var opts []string
+	if p.Header {
+		opts = append(opts, "header")
+	}
+	if p.Multi {
+		opts = append(opts, "multi")
+	}
+	if p.Column != "" {
+		opts = append(opts, "col="+p.Column)
+	}
+	if len(p.Forward) > 0 {
+		opts = append(opts, "forward="+strings.Join(p.Forward, ","))
+	}
+	if len(opts) == 0 {
+		return "-"
+	}
+	return strings.Join(opts, " ")
+}
+
+// quoteWords joins words for display, quoting any that contain whitespace so
+// the line reads back as valid config.
+func quoteWords(words []string) string {
+	out := make([]string, len(words))
+	for i, w := range words {
+		if strings.ContainsAny(w, " \t") || w == "" {
+			w = `"` + strings.ReplaceAll(w, `"`, `\"`) + `"`
+		}
+		out[i] = w
+	}
+	return strings.Join(out, " ")
 }
 
 // setup installs the running binary as DIR/dockhand and makes sure DIR is on

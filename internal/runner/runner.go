@@ -15,11 +15,18 @@ import (
 // Run resolves the alias's target(s), builds the final argv (see BuildArgv)
 // and replaces the current process with it via execve. On success it does
 // not return.
-func Run(alias config.Alias, userArgs []string) error {
+func Run(cfg *config.Config, alias config.Alias, userArgs []string) error {
 	userArgs = effectiveArgs(alias, userArgs)
-	targets, err := pick(alias.Picker, userArgs)
-	if err != nil {
-		return err
+	var targets []string
+	if alias.NeedsTarget() {
+		p, ok := cfg.FindPicker(alias.Picker)
+		if !ok {
+			return fmt.Errorf("alias %s: picker %q is not defined", alias.Name, alias.Picker)
+		}
+		var err error
+		if targets, err = picker.Pick(p, userArgs); err != nil {
+			return err
+		}
 	}
 	argv := BuildArgv(alias.Command, userArgs, targets)
 
@@ -67,29 +74,4 @@ func effectiveArgs(alias config.Alias, userArgs []string) []string {
 		return alias.DefaultArgs
 	}
 	return userArgs
-}
-
-// pick resolves the alias's target(s). userArgs is inspected by the kube
-// pickers so that -n/--context in the user's args scope what is listed.
-func pick(p config.Picker, userArgs []string) ([]string, error) {
-	one := func(name string, err error) ([]string, error) {
-		if err != nil {
-			return nil, err
-		}
-		return []string{name}, nil
-	}
-	switch p {
-	case config.PickerDocker, config.PickerDockerAll:
-		return one(picker.Container(p == config.PickerDockerAll))
-	case config.PickerCompose:
-		return picker.ComposeServices()
-	case config.PickerKubeContext:
-		return one(picker.KubeContext())
-	case config.PickerKubeNamespace:
-		return one(picker.KubeNamespace(picker.KubeScope(userArgs)))
-	case config.PickerKubePod:
-		return one(picker.KubePod(picker.KubeScope(userArgs)))
-	default:
-		return nil, nil
-	}
 }
