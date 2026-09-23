@@ -18,6 +18,9 @@ import (
 	"github.com/Innovative-Digitale-Medizin-IDM/dockhand/internal/runner"
 )
 
+// version is set at release build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		if errors.Is(err, picker.ErrAborted) {
@@ -48,6 +51,9 @@ func run() error {
 		return nil
 	case "init-config":
 		return initConfig()
+	case "version", "--version":
+		fmt.Println("dockhand", version)
+		return nil
 	case "help", "-h", "--help":
 		usage(cfg, source)
 		return nil
@@ -69,6 +75,7 @@ Usage:
   dockhand init-config           write the default config to your user config dir
   dockhand setup [--bin DIR]     copy this binary to DIR (default: ~/.local/bin)
                                  and add DIR to PATH in your shell rc if needed
+  dockhand version               print the dockhand version
 
 Configuration from %s.
 `, source)

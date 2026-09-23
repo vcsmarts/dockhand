@@ -11,6 +11,19 @@ podman, helm, systemctl or your own scripts with a line of config.
 
 ## Install
 
+Download the archive for your platform from the
+[latest release](https://github.com/vcsmarts/dockhand/releases/latest)
+(Linux and macOS, amd64 and arm64), then:
+
+```bash
+tar -xzf dockhand_*.tar.gz && ./dockhand_*/dockhand setup
+```
+
+On macOS, remove the quarantine flag first if Gatekeeper blocks the binary:
+`xattr -d com.apple.quarantine dockhand_*/dockhand`.
+
+Or build from source (Go 1.27+):
+
 ```bash
 go build -o dockhand . && ./dockhand setup
 ```

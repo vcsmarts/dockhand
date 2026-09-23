@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*} arch=${target#*/}
+            name="dockhand_${GITHUB_REF_NAME}_${os}_${arch}"
+            mkdir "dist/$name"
+            GOOS=$os GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+              -o "dist/$name/dockhand" .
+            cp README.md "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          done
+          cd dist && sha256sum *.tar.gz > checksums.txt
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt --title "$GITHUB_REF_NAME" --generate-notes
